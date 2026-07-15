@@ -1,0 +1,52 @@
+# Ignore build directories and generated files
+/build/
+/build-*/
+/CMakeFiles/
+/CMakeCache.txt
+/Makefile
+/cmake_install.cmake
+/install_manifest.txt
+/*.dir-locals.el
+
+# Ignore object files, libraries, and executables
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dll
+*.dylib
+*.exe
+*.out
+
+# Ignore Visual Studio Code settings and workspace files
+.vscode/
+
+# Ignore temporary files
+*~
+*.swp
+*.tmp
+*.log
+
+# Ignore OS files
+.DS_Store
+Thumbs.db
+
+# Ignore Docker artifacts
+docker-compose.override.yml
+
+# Ignore generated coverage and profiler output
+*.gcda
+*.gcno
+*.gcov
+*.prof
+
+# Ignore Python virtualenvs if present
+venv/
+.env/
+.env
+
+# Ignore user-specific editor files
+*.sublime-workspace
+*.sublime-project
+.idea/
