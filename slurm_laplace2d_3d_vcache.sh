@@ -21,10 +21,13 @@ srun \
   --container-image=timpezdirc/diploma-bench:latest \
   --container-mounts=$HOME:/workspace \
   --container-workdir=/workspace/diploma \
-  --container-env=OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK,OMP_PROC_BIND=true,OMP_PLACES=cores \
   bash -c '
 
 set -e
+
+export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
+export OMP_PROC_BIND=true
+export OMP_PLACES=cores
 
 echo "===== BUILD STEP ====="
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
