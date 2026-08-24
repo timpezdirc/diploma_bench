@@ -3,9 +3,76 @@
 #include <chrono>
 #include <random>
 #include <algorithm>
+#include <cstdlib>
+#include <fstream>
+#include <string>
 
 using namespace std;
 using namespace std::chrono;
+
+// perf stat control
+class PerfController {
+private:
+    ofstream control;
+    ifstream ack;
+    bool enabled = false;
+
+    void sendCommand(const string& command) {
+        if(!enabled) {
+            return;
+        }
+
+        control << command << '\n' << flush;
+
+        if(!control) {
+            cerr << "Failed to send perf control command: "
+                 << command << '\n';
+            exit(1);
+        }
+
+        string response;
+
+        if(!getline(ack, response)) {
+            cerr << "Failed to read acknowledgement from perf\n";
+            exit(1);
+        }
+
+        if(response.find("ack") == string::npos) {
+            cerr << "Unexpected perf acknowledgement: "
+                << response << '\n';
+            exit(1);
+        }
+    }
+
+public:
+    PerfController() {
+        const char* controlPath = getenv("PERF_CTL_FIFO");
+        const char* ackPath = getenv("PERF_ACK_FIFO");
+
+        // normal execution without perf control is still allowed
+        if(controlPath == nullptr || ackPath == nullptr) {
+            return;
+        }
+
+        control.open(controlPath);
+        ack.open(ackPath);
+
+        if(!control.is_open() || !ack.is_open()) {
+            cerr << "Failed to open perf control FIFOs\n";
+            exit(1);
+        }
+
+        enabled = true;
+    }
+
+    void startMeasurement() {
+        sendCommand("enable");
+    }
+
+    void stopMeasurement() {
+        sendCommand("disable");
+    }
+};
 
 // restore the heap property for the subtree rooted at index i
 void heapify(vector<int>& arr, int n, int i) {
@@ -59,13 +126,21 @@ int main(int argc, char* argv[]) {
         original[i] = dist(rng);
     }
 
+     PerfController perf;
+
     // run the benchmark multiple times and measure average execution time
     double totalTime = 0.0;
     for(int run = 0; run < numRuns; run++) {
         vector<int> arr = original;
+
+        perf.startMeasurement();
         auto start = high_resolution_clock::now();
+
         heapSort(arr);
+
         auto end = high_resolution_clock::now();
+        perf.stopMeasurement();
+
         totalTime += duration<double>(end - start).count();
     }
 
