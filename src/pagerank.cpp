@@ -123,17 +123,10 @@ int main(int argc, char* argv[]) {
     cout << "[PAPI] Added: PAPI_L2_DCM" << endl;
 
 
-    // DRAM near
+    // DRAM fills
     add_named_event(
         EventSet,
-        "DEMAND_DATA_CACHE_FILLS_FROM_SYSTEM:DRAM_IO_NEAR"
-    );
-
-
-    // DRAM far
-    add_named_event(
-        EventSet,
-        "DEMAND_DATA_CACHE_FILLS_FROM_SYSTEM:DRAM_IO_FAR"
+        "ANY_DATA_CACHE_FILLS_FROM_SYSTEM:DRAM_IO_NEAR:DRAM_IO_FAR"
     );
 
 
@@ -141,7 +134,7 @@ int main(int argc, char* argv[]) {
          << PAPI_num_events(EventSet)
          << endl;
 
-    long long values[4] = {0, 0, 0, 0};
+    long long values[3] = {0, 0, 0};
 
     handle_papi_error(
         PAPI_start(EventSet),
@@ -167,6 +160,7 @@ int main(int argc, char* argv[]) {
     }
 
     auto end = high_resolution_clock::now();
+
     handle_papi_error(
         PAPI_stop(EventSet, values),
         "PAPI_stop failed"
@@ -176,15 +170,11 @@ int main(int argc, char* argv[]) {
 
     long long l1 = values[0];
     long long l2 = values[1];
-
-    long long dram_near = values[2];
-    long long dram_far = values[3];
-
-    long long dram_fills = dram_near + dram_far;
+    long long dram_fills = values[2];
 
     double checksum = 0.0;
 
-    for (double value : pr) {
+    for(double value : pr) {
         checksum += value;
     }
 
@@ -194,10 +184,6 @@ int main(int argc, char* argv[]) {
     cout << "L1 DCM: " << l1 << "\n";
 
     cout << "L2 DCM: " << l2 << "\n";
-
-    cout << "DRAM NEAR: " << dram_near << "\n";
-
-    cout << "DRAM FAR: " << dram_far << "\n";
 
     cout << "DRAM FILLS: " << dram_fills << "\n";
 
@@ -212,6 +198,8 @@ int main(int argc, char* argv[]) {
         PAPI_destroy_eventset(&EventSet),
         "PAPI_destroy_eventset failed"
     );
+
+    PAPI_shutdown();
 
     return 0;
 }

@@ -2,77 +2,46 @@
 #include <chrono>
 #include <cmath>
 #include <algorithm>
-#include <fstream>
-#include <string>
 #include <cstdlib>
+#include <string>
 #include <memory>
 #include <omp.h>
+#include <papi.h>
+#include <unistd.h>
+#include <sys/syscall.h>
 #include <sched.h>
 
 using namespace std;
 
-// perf stat helper class
-class PerfController {
-private:
-    ofstream control;
-    ifstream ack;
-    bool enabled = false;
+// PAPI helper functions
+unsigned long papi_thread_id() {
+    return static_cast<unsigned long>(syscall(SYS_gettid));
+}
 
-    void sendCommand(const string& command) {
-        if(!enabled) {
-            return;
-        }
 
-        control << command << '\n' << flush;
-
-        if(!control) {
-            cerr << "Failed to send perf control command: "
-                 << command << '\n';
-            exit(1);
-        }
-
-        string response;
-
-        if(!getline(ack, response)) {
-            cerr << "Failed to read acknowledgement from perf\n";
-            exit(1);
-        }
-
-        if(response.find("ack") == string::npos) {
-            cerr << "Unexpected perf acknowledgement: "
-                 << response << '\n';
-            exit(1);
-        }
+void handle_papi_error(int retval, const string& message) {
+    if(retval != PAPI_OK) {
+        cerr << message << ": " << PAPI_strerror(retval) << endl;
+        abort();
     }
+}
 
-public:
-    PerfController() {
-        const char* controlPath = getenv("PERF_CTL_FIFO");
-        const char* ackPath = getenv("PERF_ACK_FIFO");
 
-        if(controlPath == nullptr || ackPath == nullptr) {
-            return;
-        }
+int get_named_event(const char* event_name) {
+    int event_code = 0;
 
-        control.open(controlPath);
-        ack.open(ackPath);
+    int retval = PAPI_event_name_to_code(
+        const_cast<char*>(event_name),
+        &event_code
+    );
 
-        if(!control.is_open() || !ack.is_open()) {
-            cerr << "Failed to open perf control FIFOs\n";
-            exit(1);
-        }
+    handle_papi_error(
+        retval,
+        string("Could not find event ") + event_name
+    );
 
-        enabled = true;
-    }
-
-    void startMeasurement() {
-        sendCommand("enable");
-    }
-
-    void stopMeasurement() {
-        sendCommand("disable");
-    }
-};
+    return event_code;
+}
 
 // Laplace helper functions
 inline size_t idx(size_t i, size_t j, size_t Ny) {
@@ -96,7 +65,7 @@ int main(int argc, char* argv[]) {
     size_t Nx = 2048;
     size_t Ny = 2048;
     size_t maxIter = 2000;
-    size_t numRuns = 10;
+    size_t numRuns = 1;
 
     if(argc > 1) Nx = stoul(argv[1]);
     if(argc > 2) Ny = stoul(argv[2]);
@@ -104,6 +73,30 @@ int main(int argc, char* argv[]) {
     if(argc > 4) numRuns = stoul(argv[4]);
 
     const size_t totalSize = Nx * Ny;
+
+    // PAPI initialization
+    int retval = PAPI_library_init(PAPI_VER_CURRENT);
+
+    if(retval != PAPI_VER_CURRENT) {
+        cerr << "PAPI initialization failed" << endl;
+        return 1;
+    }
+
+    handle_papi_error(
+        PAPI_thread_init(papi_thread_id),
+        "PAPI_thread_init failed"
+    );
+
+    // hardware events
+    int dram_code = get_named_event(
+        "ANY_DATA_CACHE_FILLS_FROM_SYSTEM:DRAM_IO_NEAR:DRAM_IO_FAR"
+    );
+
+    const int event_codes[3] = {
+        PAPI_L1_DCM,
+        PAPI_L2_DCM,
+        dram_code
+    };
 
     cout << "-------------------------------------------" << "\n";
     cout << "Grid: " << Nx << " x " << Ny << "\n";
@@ -116,29 +109,18 @@ int main(int argc, char* argv[]) {
     unique_ptr<double[]> u(new double[totalSize]);
     unique_ptr<double[]> u_new(new double[totalSize]);
 
-    PerfController perf;
-
     double totalTime = 0.0;
+    long long total_l1 = 0;
+    long long total_l2 = 0;
+    long long total_dram = 0;
     double checksum = 0.0;
-
-    // diagnostic OpenMP thread placement
-    cout << "===== OpenMP thread placement =====\n";
-
-    #pragma omp parallel
-    {
-        int tid = omp_get_thread_num();
-        int cpu = sched_getcpu();
-
-        #pragma omp critical
-        {
-            cout << "Thread " << tid << " -> CPU " << cpu << "\n";
-        }
-    }
-
-    cout << "===================================\n";
 
     // benchmarking
     for(size_t run = 0; run < numRuns; run++) {
+        long long run_l1 = 0;
+        long long run_l2 = 0;
+        long long run_dram = 0;
+
         chrono::high_resolution_clock::time_point start;
         chrono::high_resolution_clock::time_point end;
 
@@ -148,16 +130,18 @@ int main(int argc, char* argv[]) {
         // The SAME OpenMP team:
         //
         // 1. initializes the arrays in parallel (first-touch),
-        // 2. starts perf counters,
+        // 2. initializes PAPI per thread,
         // 3. performs the measured Laplace kernel.
         //
-        // Parallel initialization is outside perf counters
+        // Parallel initialization is outside PAPI counters
         // and outside the execution timer.
         // ----------------------------------------------------
 
         #pragma omp parallel shared( \
             u, u_new, \
-            start, end, perf)
+            start, end, \
+            run_l1, run_l2, \
+            run_dram)
         {
 
             // parallel initialization / NUMA first-touch
@@ -185,18 +169,50 @@ int main(int argc, char* argv[]) {
                 );
             }
 
+            // register OpenMP thread with PAPI
+            handle_papi_error(
+                PAPI_register_thread(),
+                "PAPI_register_thread failed"
+            );
+
+            // one EventSet per thread, since PAPI is not thread-safe
+            int EventSet = PAPI_NULL;
+
+            handle_papi_error(
+                PAPI_create_eventset(&EventSet),
+                "PAPI_create_eventset failed"
+            );
+
+            // add three events
+            for(int e = 0; e < 3; e++) {
+                handle_papi_error(
+                    PAPI_add_event(
+                        EventSet,
+                        event_codes[e]
+                    ),
+                    "PAPI_add_event failed"
+                );
+            }
+
+            long long values[3] = {
+                0,
+                0,
+                0
+            };
+
             // wait until all threads are completely ready
             #pragma omp barrier
 
-            // start hardware counters
-            #pragma omp single
-            {
-                perf.startMeasurement();
-            }
+            // start counters
+            handle_papi_error(
+                PAPI_start(EventSet),
+                "PAPI_start failed"
+            );
 
             #pragma omp barrier
 
             // start timer only after counters are active
+
             #pragma omp single
             {
                 start = chrono::high_resolution_clock::now();
@@ -210,7 +226,7 @@ int main(int argc, char* argv[]) {
                         size_t id = idx(i, j, Ny);
 
                         u_new[id] = 0.25 * (u[id + Ny] + u[id - Ny] +
-                                          u[id + 1] + u[id - 1]);
+                                            u[id + 1] + u[id - 1]);
                     }
                 }
 
@@ -232,14 +248,46 @@ int main(int argc, char* argv[]) {
             #pragma omp barrier
 
             // stop hardware counters
-            #pragma omp single
+            handle_papi_error(
+                PAPI_stop(
+                    EventSet,
+                    values
+                ),
+                "PAPI_stop failed"
+            );
+
+            // sum counters over all threads
+            #pragma omp critical
             {
-                perf.stopMeasurement();
+                run_l1 += values[0];
+                run_l2 += values[1];
+                run_dram += values[2];
             }
+
+            // cleanup PAPI
+            handle_papi_error(
+                PAPI_cleanup_eventset(EventSet),
+                "PAPI_cleanup_eventset failed"
+            );
+
+            handle_papi_error(
+                PAPI_destroy_eventset(&EventSet),
+                "PAPI_destroy_eventset failed"
+            );
+
+            handle_papi_error(
+                PAPI_unregister_thread(),
+                "PAPI_unregister_thread failed"
+            );
         }
 
-        // store result
+        // store results
         totalTime += chrono::duration<double>(end - start).count();
+
+        total_l1 += run_l1;
+        total_l2 += run_l2;
+
+        total_dram += run_dram;
     }
 
     // checksum computation for validation
@@ -248,10 +296,21 @@ int main(int argc, char* argv[]) {
     }
 
     // average results
-    cout << "Average time over " << numRuns << " runs: "
-         << totalTime / numRuns << " seconds\n";
+    long long avg_l1 = total_l1 / static_cast<long long>(numRuns);
+    long long avg_l2 = total_l2 / static_cast<long long>(numRuns);
+    long long avg_dram_fills = total_dram / static_cast<long long>(numRuns);
+
+    cout << "Average time over " << numRuns << " runs: " << totalTime / numRuns << " seconds\n";
+
+    cout << "Average L1 DCM: " << avg_l1 << "\n";
+
+    cout << "Average L2 DCM: " << avg_l2 << "\n";
+
+    cout << "Average DRAM FILLS: " << avg_dram_fills << "\n";
 
     cout << "Checksum: " << checksum << "\n";
+
+    PAPI_shutdown();
 
     return 0;
 }

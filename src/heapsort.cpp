@@ -45,7 +45,7 @@ int add_named_event(int EventSet, const char* event_name) {
     return event_code;
 }
 
-// heapif function
+// heapify function
 void heapify(vector<int>& arr, int n, int i) {
     int largest = i;
     int left = 2 * i + 1;
@@ -117,15 +117,10 @@ int main(int argc, char* argv[]) {
 
     cout << "[PAPI] Added: PAPI_L2_DCM" << endl;
 
-    // DRAM demand fills
+    // DRAM fills
     add_named_event(
         EventSet,
-        "DEMAND_DATA_CACHE_FILLS_FROM_SYSTEM:DRAM_IO_NEAR"
-    );
-
-    add_named_event(
-        EventSet,
-        "DEMAND_DATA_CACHE_FILLS_FROM_SYSTEM:DRAM_IO_FAR"
+        "ANY_DATA_CACHE_FILLS_FROM_SYSTEM:DRAM_IO_NEAR:DRAM_IO_FAR"
     );
 
     cout << "[PAPI] Number of active events: " << PAPI_num_events(EventSet) << endl;
@@ -145,16 +140,14 @@ int main(int argc, char* argv[]) {
 
     long long total_l1 = 0;
     long long total_l2 = 0;
-
-    long long total_dram_near = 0;
-    long long total_dram_far = 0;
+    long long total_dram = 0;
 
 
     for(int run = 0; run < numRuns; run++) {
 
         // copy is OUTSIDE measurement
         vector<int> arr = original;
-        long long values[4] = {0, 0, 0, 0};
+        long long values[3] = {0, 0, 0};
 
         // start PAPI counters
         handle_papi_error(
@@ -179,12 +172,10 @@ int main(int argc, char* argv[]) {
 
         // values[0] = PAPI_L1_DCM
         // values[1] = PAPI_L2_DCM
-        // values[2] = DRAM_IO_NEAR
-        // values[3] = DRAM_IO_FAR
+        // values[2] = DRAM fills
         total_l1 += values[0];
         total_l2 += values[1];
-        total_dram_near += values[2];
-        total_dram_far += values[3];
+        total_dram += values[2];
     }
 
     // PAPI cleanup
@@ -201,9 +192,7 @@ int main(int argc, char* argv[]) {
     // average results
     long long avg_l1 = total_l1 / numRuns;
     long long avg_l2 = total_l2 / numRuns;
-    long long avg_dram_near = total_dram_near / numRuns;
-    long long avg_dram_far = total_dram_far / numRuns;
-    long long avg_dram_fills = avg_dram_near + avg_dram_far;
+    long long avg_dram_fills = total_dram / numRuns;
 
 
     cout << "N: " << N << "\n";
@@ -213,10 +202,6 @@ int main(int argc, char* argv[]) {
     cout << "Average L1 DCM: " << avg_l1 << "\n";
 
     cout << "Average L2 DCM: " << avg_l2 << "\n";
-
-    cout << "Average DRAM NEAR: " << avg_dram_near << "\n";
-
-    cout << "Average DRAM FAR: " << avg_dram_far << "\n";
 
     cout << "Average DRAM FILLS: " << avg_dram_fills << "\n";
 

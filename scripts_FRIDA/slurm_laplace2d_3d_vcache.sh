@@ -16,53 +16,6 @@ set -euo pipefail
 PROJECT_DIR="$HOME/diploma"
 CONTAINER_IMAGE="$HOME/containers/diploma-bench.sqsh"
 
-# temporary perf files
-PERF_DIR="${SCRATCH:-/tmp}/laplace_perf_${SLURM_JOB_ID}"
-
-KERNEL_RELEASE="$(uname -r)"
-HOST_PERF=""
-
-if [[ "$(od -An -N4 -tx1 /usr/bin/perf 2>/dev/null | tr -d ' \n')" == "7f454c46" ]]; then
-    HOST_PERF="/usr/bin/perf"
-else
-    HOST_PERF=$(
-        find /usr/lib \
-            -maxdepth 4 \
-            -type f \
-            -name perf \
-            -perm -111 \
-            2>/dev/null |
-        grep -F "$KERNEL_RELEASE" |
-        head -1 || true
-    )
-
-    if [[ -z "$HOST_PERF" ]]; then
-        HOST_PERF=$(
-            find /usr/lib \
-                -maxdepth 4 \
-                -type f \
-                -name perf \
-                -perm -111 \
-                -print -quit \
-                2>/dev/null || true
-        )
-    fi
-fi
-
-if [[ -z "$HOST_PERF" || ! -x "$HOST_PERF" ]]; then
-    echo "ERROR: could not find host perf binary." >&2
-    exit 1
-fi
-
-if [[ ! -f "$CONTAINER_IMAGE" ]]; then
-    echo "ERROR: container image not found: $CONTAINER_IMAGE" >&2
-    exit 1
-fi
-
-mkdir -p "$PERF_DIR"
-
-trap 'rm -rf "$PERF_DIR"' EXIT
-
 echo "===== Job info ====="
 echo "Job ID     : $SLURM_JOB_ID"
 echo "Node       : $SLURM_NODELIST"
@@ -75,10 +28,15 @@ export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
 export OMP_PROC_BIND=true
 export OMP_PLACES=cores
 
+if [[ ! -f "$CONTAINER_IMAGE" ]]; then
+    echo "ERROR: container image not found: $CONTAINER_IMAGE" >&2
+    exit 1
+fi
+
 srun \
   --cpu-bind=none \
   --container-image="$CONTAINER_IMAGE" \
-  --container-mounts="$HOME:/workspace,$PERF_DIR:/tmp/perf-control,$HOST_PERF:/tmp/host-perf" \
+  --container-mounts="$HOME:/workspace" \
   --container-workdir=/workspace/diploma \
   bash -s <<'EOF'
 
@@ -92,15 +50,13 @@ BUILD_DIR="build_laplace2d_${SLURM_JOB_ID}"
 # unique result file for this SLURM job
 RESULTS_CSV="$PROJECT_DIR/laplace2d_3d_vcache_runs_${SLURM_JOB_ID}.csv"
 
-# temporary perf files
-PERF_DIR="/tmp/perf-control"
-
 echo ""
 echo "===== BUILD STEP ====="
 echo "Build directory: $BUILD_DIR"
 
 cmake -S . -B "$BUILD_DIR" \
-    -DCMAKE_BUILD_TYPE=Release
+    -DCMAKE_BUILD_TYPE=Release \
+    -DUSE_PAPI=ON
 
 cmake --build "$BUILD_DIR" \
     --target laplace2d \
@@ -145,53 +101,21 @@ run_laplace () {
     echo "======================================="
 
     for ((i=1; i<=RUNS; i++)); do
-        local CTL_FIFO="$PERF_DIR/ctl_${NX}_${NY}_${i}"
-        local ACK_FIFO="$PERF_DIR/ack_${NX}_${NY}_${i}"
-        local PERF_FILE="$PERF_DIR/perf_${NX}_${NY}_${i}.csv"
-
-        rm -f \
-            "$CTL_FIFO" \
-            "$ACK_FIFO" \
-            "$PERF_FILE"
-
-        mkfifo "$CTL_FIFO"
-        mkfifo "$ACK_FIFO"
-
-
-        # open both FIFOs before starting perf to prevent blocking
-        exec 9<>"$CTL_FIFO"
-        exec 8<>"$ACK_FIFO"
 
         local OUTPUT
 
         OUTPUT=$(
-            PERF_CTL_FIFO="$CTL_FIFO" \
-            PERF_ACK_FIFO="$ACK_FIFO" \
-            /tmp/host-perf stat \
-              --delay=-1 \
-              --control="fifo:${CTL_FIFO},${ACK_FIFO}" \
-              --no-big-num \
-              -x ';' \
-              -o "$PERF_FILE" \
-              -e 'L1-dcache-load-misses:u' \
-              -e 'l2_cache_misses_from_dc_misses:u' \
-              -e 'cpu/event=0x43,umask=0x48,name=dram_fills/u' \
-              -- "$BIN" \
-                   "$NX" \
-                   "$NY" \
-                   "$MAXITER" \
-                   1
+            "$BIN" \
+                "$NX" \
+                "$NY" \
+                "$MAXITER" \
+                1
         )
 
-        # close FIFO descriptors
-        exec 9>&-
-        exec 8>&-
-
-        rm -f \
-            "$CTL_FIFO" \
-            "$ACK_FIFO"
-
         local TIME
+        local L1
+        local L2
+        local DRAM
 
         TIME=$(
             echo "$OUTPUT" |
@@ -200,38 +124,25 @@ run_laplace () {
             tail -1
         )
 
-        local L1
-        local L2
-        local DRAM
-
         L1=$(
-            awk -F';' '
-                $3 ~ /L1-dcache-load-misses/ {
-                    gsub(/[[:space:]]/, "", $1)
-                    print $1
-                    exit
-                }
-            ' "$PERF_FILE"
+            echo "$OUTPUT" |
+            grep -oP \
+            "Average L1 DCM: \K[0-9]+" |
+            tail -1
         )
 
         L2=$(
-            awk -F';' '
-                $3 ~ /l2_cache_misses_from_dc_misses/ {
-                    gsub(/[[:space:]]/, "", $1)
-                    print $1
-                    exit
-                }
-            ' "$PERF_FILE"
+            echo "$OUTPUT" |
+            grep -oP \
+            "Average L2 DCM: \K[0-9]+" |
+            tail -1
         )
 
         DRAM=$(
-            awk -F';' '
-                $3 ~ /dram_fills/ {
-                    gsub(/[[:space:]]/, "", $1)
-                    print $1
-                    exit
-                }
-            ' "$PERF_FILE"
+            echo "$OUTPUT" |
+            grep -oP \
+            "Average DRAM FILLS: \K[0-9]+" |
+            tail -1
         )
 
         if [[ -z "$TIME" ||
@@ -245,14 +156,11 @@ run_laplace () {
             echo "Program output:"
             echo "$OUTPUT"
 
-            echo ""
-            echo "Perf output:"
-            cat "$PERF_FILE"
-
             exit 1
         fi
 
         echo "  Run $i / $RUNS: Time=$TIME s | L1_DCM=$L1 | L2_DCM=$L2 | DRAM_FILLS=$DRAM"
+
         echo "$NX,$NY,$MAXITER,$i,$TIME,$L1,$L2,$DRAM" \
             >> "$RESULTS_CSV"
 
@@ -265,8 +173,6 @@ run_laplace () {
                     printf "%.10f", a+b
                 }'
         )
-
-        rm -f "$PERF_FILE"
 
     done
 

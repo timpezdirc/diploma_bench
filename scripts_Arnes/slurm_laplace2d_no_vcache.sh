@@ -39,7 +39,7 @@ BUILD_DIR="build_laplace2d_${SLURM_JOB_ID}"
 
 RESULTS_CSV="laplace2d_no_vcache_runs_${SLURM_JOB_ID}.csv"
 
-echo "nx,ny,max_iter,run,time_sec,l1_dcm,l2_dcm,dram_near,dram_far,dram_fills" \
+echo "nx,ny,max_iter,run,time_sec,l1_dcm,l2_dcm,dram_fills" \
     > "$RESULTS_CSV"
 
 echo ""
@@ -119,20 +119,6 @@ run_laplace () {
             tail -1
         )
 
-        DRAM_NEAR=$(
-            echo "$OUTPUT" |
-            grep -oP \
-                "Average DRAM NEAR: \K[0-9]+" |
-            tail -1
-        )
-
-        DRAM_FAR=$(
-            echo "$OUTPUT" |
-            grep -oP \
-                "Average DRAM FAR: \K[0-9]+" |
-            tail -1
-        )
-
         DRAM=$(
             echo "$OUTPUT" |
             grep -oP \
@@ -143,13 +129,11 @@ run_laplace () {
         if [[ -n "$TIME" &&
               -n "$L1" &&
               -n "$L2" &&
-              -n "$DRAM_NEAR" &&
-              -n "$DRAM_FAR" &&
               -n "$DRAM" ]]; then
 
-            echo "Run $i / $RUNS: Time=$TIME s | L1_DCM=$L1 | L2_DCM=$L2 | DRAM_NEAR=$DRAM_NEAR | DRAM_FAR=$DRAM_FAR | DRAM_FILLS=$DRAM"
+            echo "Run $i / $RUNS: Time=$TIME s | L1_DCM=$L1 | L2_DCM=$L2 | DRAM_FILLS=$DRAM"
 
-            echo "$NX,$NY,$MAXITER,$i,$TIME,$L1,$L2,$DRAM_NEAR,$DRAM_FAR,$DRAM" \
+            echo "$NX,$NY,$MAXITER,$i,$TIME,$L1,$L2,$DRAM" \
                 >> "$RESULTS_CSV"
 
             SUM=$(
